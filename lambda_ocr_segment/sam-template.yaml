@@ -1,0 +1,29 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'SAM template for Python Lambda function using existing IAM role'
+
+#Parameters:
+#  AccountId:
+#    Type: String
+#    Default: !Ref AWS::AccountId  # This will use the current account ID
+#    Description: The AWS Account ID where the IAM role exists
+
+Resources:
+  GptOcrFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: gpt_ocr
+      Handler: lambda_function.lambda_handler
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/database_service_lambda  # Replace with your actual role ARN
+      CodeUri: ./
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          DEV: False
+
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt GptOcrFunction.Arn

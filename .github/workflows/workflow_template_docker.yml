@@ -1,0 +1,173 @@
+name: Deploy Python Lambda with Docker and SAM
+
+on:
+  push:
+    branches: [ your_branch ]
+    paths:
+      - 'target_path/**'
+
+
+  workflow_dispatch:
+
+env:
+ ECR_REPOSITORY: ""
+ STACK_NAME: ""
+ PROXY_HOST: ""
+ LAMBDA_ROLE_NAME: ""
+ DB_INSTANCE_NAME: ""
+ DB_NAME: ""
+ FUNCTION_NAME: ""
+ RESOURCE_NAME: ""
+ SECRETE_ID: ""
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-cd
+          role-duration-seconds: 1800
+          role-skip-session-tagging: true
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+        with:
+          mask-password: true
+
+      - name: Create ECR repository if it doesn't exist
+        run: |
+          aws ecr describe-repositories --repository-names table-parse-function || \
+          aws ecr create-repository --repository-name table-parse-function
+
+      - name: Prepare Docker build context
+        run: |
+          # Create a temporary build directory
+          mkdir -p docker-build
+          
+          # Copy Lambda function files
+          cp -r target_path/*.py docker-build/
+          cp -r table_parse_local/*.py docker-build/
+          cp -r target_path/pyproject.toml docker-build/
+          cp -r target_path/poetry.lock* docker-build/ 2>/dev/null || :
+          
+          # Copy the external modules directly to the build directory (not nested)
+          cp -r pipeline_utils docker-build/
+          cp -r database_service docker-build/
+          
+          # Create Dockerfile in the build context
+          cat > docker-build/Dockerfile << EOF
+          FROM public.ecr.aws/lambda/python:3.12
+          
+          # Copy function code
+          COPY *.py \${LAMBDA_TASK_ROOT}/
+          
+          # Copy the dependencies 
+          COPY pipeline_utils/ \${LAMBDA_TASK_ROOT}/pipeline_utils/
+          COPY database_service/ \${LAMBDA_TASK_ROOT}/database_service/
+          
+          # Copy poetry files
+          COPY pyproject.toml \${LAMBDA_TASK_ROOT}/
+          # COPY poetry.lock* \${LAMBDA_TASK_ROOT}/
+          
+          # Install poetry and dependencies
+          RUN pip install poetry && \\
+              cd \${LAMBDA_TASK_ROOT} && \\
+              poetry config virtualenvs.create false && \\
+              if [ -f poetry.lock ]; then cp poetry.lock \${LAMBDA_TASK_ROOT}/; fi && \\
+              poetry install --only main --no-interaction --no-ansi
+          
+          # Set the CMD to your handler
+          CMD [ "lambda_function.lambda_handler" ]
+          EOF
+          
+          # List files for debugging
+          echo "Files in build directory:"
+          ls -la docker-build
+          echo "Pipeline utils:"
+          ls -la docker-build/pipeline_utils || echo "pipeline_utils directory is empty or doesn't exist"
+          echo "Database service:"
+          ls -la docker-build/database_service || echo "database_service directory is empty or doesn't exist"
+
+      - name: Build and push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Build docker image from the prepared context
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG docker-build/
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          
+          # Push docker image
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      - name: Setup SAM CLI
+        uses: aws-actions/setup-sam@v2
+
+      - name: SAM Validate
+        run: |
+          cd target_path
+          sam validate --template-file sam-template.yaml
+          
+
+      - name: Update SAM template
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          cd target_path
+          # Create or update SAM template with the correct ImageUri
+          cat > sam-template.yaml << EOF
+          AWSTemplateFormatVersion: '2010-09-09'
+          Transform: AWS::Serverless-2016-10-31
+          Description: 'SAM template for Python Lambda function using Docker container from ECR'
+          
+          Resources:
+            $RESOURCE_NAME:
+              Type: AWS::Serverless::Function
+              Properties:
+                FunctionName: $FUNCTION_NAME
+                PackageType: Image
+                Role: !Sub arn:aws:iam::\${AWS::AccountId}:role/$LAMBDA_ROLE_NAME
+                ImageUri: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+                Timeout: 30
+                MemorySize: 128
+                Environment:
+                  Variables:
+                    DEV: False
+                    DB_INSTANCE_NAME: $DB_INSTANCE_NAME
+                    DB_NAME: $DB_NAME
+                    ROLE_ARN: !Sub arn:aws:iam::\${AWS::AccountId}:role/$LAMBDA_ROLE_NAME
+                    SECRET_ID: $SECRET_ID
+                    ACCOUNT_ID: !Ref AWS::AccountId
+                    DB_PORT: 5432
+                    PROXY_HOST: $PROXY_HOST
+          
+          Outputs:
+            LambdaFunctionArn:
+              Description: ARN of the Lambda function
+              Value: !GetAtt $RESOURCE_NAME.Arn
+          EOF
+
+      - name: SAM Deploy
+        env:
+          ECR_IMAGE_URI: ${{ steps.build-image.outputs.image }}
+          IMAGE_REPO: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+        run: |
+          cd target_path
+          sam deploy \
+          --template-file sam-template.yaml \
+          --stack-name ${{env.STACK_NAME}} \
+          --no-confirm-changeset \
+          --no-fail-on-empty-changeset \
+          --s3-bucket ${{ secrets.DEPLOYMENT_BUCKET }} \
+          --capabilities CAPABILITY_IAM \
+          --image-repository ${{ env.IMAGE_REPO }} 

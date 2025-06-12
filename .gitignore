@@ -1,0 +1,15 @@
+temp/
+test/
+logs/
+__pycache__/
+*_archived/
+.idea/
+aws.json
+psql.json
+*_key.json
+*psql.json
+*.ipynb
+*.pt
+test/init_db_instance_proxy_archived.py
+.xlsx
+.env

@@ -1,0 +1,29 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'SAM template for Python Lambda function using Docker container from ECR'
+
+Resources:
+  SheetFilterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: sheet_filter_function
+      PackageType: Image
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/database_service_lambda
+      ImageUri: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/sheet-filter-function:latest
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          DEV: False
+          DB_INSTANCE_NAME: "db-server-dev"
+          DB_NAME: "ml_process_dev"
+          ROLE_ARN: !Sub arn:aws:iam::${AWS::AccountId}:role/database_service_lambda
+          SECRET_ID: "rds!db-2fad861b-59e3-4c8d-9f40-6504e09bef9a"
+          ACCOUNT_ID: !Ref AWS::AccountId
+          DB_PROT: 5432
+          PROXY_HOST: "db-server-proxy.proxy-cfuyqiicepkx.us-east-2.rds.amazonaws.com"
+
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt SheetFilterFunction.Arn

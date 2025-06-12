@@ -1,0 +1,133 @@
+name: Deploy Python Lambda with SAM
+
+on:
+  push:
+    branches: [ your_branch ]
+    paths:
+      - 'target_path/**'
+
+  
+env:
+  TASK_NAME: ""
+  TARGET_PATH: "target_path/"
+  RESOURCE_NAME: ""
+  FUNCTION_NAME: ""
+  ROLE_NAME: "database_service_lambda"
+  SECRET_ID: ""
+  PROXY_HOST: ""
+  INSTANCE_HOST: ""
+  PACKAGE_ZIP_NAME: ""
+  S3_DEPLOY_BUCKET: ""
+  S3_DIR: ""
+  DB_INSTANCE_NAME: ""
+  DB_NAME: ""
+  STACK_NAME: ""
+  SECURITY_GROUP: ${{secrets.SECURITY_GROUP_ID}}
+  SUB_NET1: ""
+  SUB_NET2: ""
+
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Set up Poetry
+        uses: snok/install-poetry@v1
+
+      - name: Add export plugin
+        run: poetry self add poetry-plugin-export
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-cd
+          role-duration-seconds: 1800
+          role-skip-session-tagging: true
+
+      - name: Create Lambda Package and upload to S3
+        id: pack_modules
+        run: |
+          cd $TARGET_PATH
+          chmod +x ./package.sh
+          ./package.sh
+
+      - name: Setup SAM CLI
+        uses: aws-actions/setup-sam@v2
+
+      - name: SAM Validate
+        run: |
+          cd $TARGET_PATH
+          sam validate --template-file sam-template.yaml
+          
+      - name: Update SAM template
+        run: |
+          cd ${{ env.TARGET_PATH }}
+          # Create or update SAM template with the correct values
+          cat > sam-template.yaml << EOF
+          AWSTemplateFormatVersion: '2010-09-09'
+          Transform: AWS::Serverless-2016-10-31
+          Description: 'SAM template for Python Lambda function'
+          
+          Resources:
+            TestDBConnectFunction:
+              Type: AWS::Serverless::Function
+              Properties:
+                FunctionName: ${{ env.FUNCTION_NAME }}
+                Handler: lambda_function.lambda_handler
+                Role: !Sub arn:aws:iam::\${AWS::AccountId}:role/database_service_lambda
+                CodeUri:
+                  Bucket: ${{ env.S3_DEPLOY_BUCKET }}
+                  Key: lambda_packages/${{ env.PACKAGE_ZIP_NAME }}.zip
+                Runtime: python3.12
+                Timeout: 30
+                MemorySize: 128
+                Environment:
+                  Variables:
+                    DEV: False
+                    DB_INSTANCE_NAME: ${{ env.DB_INSTANCE_NAME }}
+                    DB_NAME: ${{ env.DB_NAME }}
+                    ROLE_ARN: !Sub arn:aws:iam::\${AWS::AccountId}:role/database_service_lambda
+                    SECRET_ID: "${{ env.SECRET_ID }}"
+                VpcConfig:
+                  SecurityGroupIds:
+                    - ${{ env.SECURITY_GROUP }}
+                  SubnetIds:
+                    - ${{ env.SUB_NET1 }}
+                    - ${{ env.SUB_NET2 }}
+          
+          Outputs:
+            LambdaFunctionArn:
+              Description: ARN of the Lambda function
+              Value: !GetAtt $RESOURCE_NAME.Arn
+          EOF
+
+      - name: SAM Build
+        run: |
+          cd $TARGET_PATH
+          sam build --template-file sam-template.yaml
+
+      - name: SAM Deploy
+        run: |
+          cd $TARGET_PATH
+          sam deploy \
+          --template-file sam-template.yaml \
+          --no-confirm-changeset \
+          --no-fail-on-empty-changeset \
+          --stack-name $STACK_NAME \
+          --s3-bucket ${{ secrets.DEPLOYMENT_BUCKET }} \
+          --capabilities CAPABILITY_IAM
+          
+
+          
+          
+

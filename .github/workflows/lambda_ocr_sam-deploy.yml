@@ -1,0 +1,71 @@
+name: Deploy Python Lambda with SAM
+
+on:
+  push:
+    branches: [ lambda_deploy ]
+    paths:
+      - 'lambda_ocr_segment/**'
+
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v3
+        with:
+          path: lambda_ocr_segment/
+          key: ${{ runner.os }}-pip-${{ hashFiles('lambda_ocr_segment/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          cd lambda_ocr_segment
+          python -m pip install --upgrade pip 
+          if [ -f requirements.txt ]; then pip install -r requirements.txt -t .; fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-ci-cd
+          role-duration-seconds: 1800
+          role-skip-session-tagging: true
+
+      - name: Setup SAM CLI
+        uses: aws-actions/setup-sam@v2
+
+      - name: SAM Validate
+        run: |
+          cd lambda_ocr_segment
+          sam validate --template-file sam-template.yaml
+
+      - name: SAM Build
+        run: |
+          cd lambda_ocr_segment
+          sam build --template-file sam-template.yaml
+
+      - name: SAM Deploy
+        run: |
+          cd lambda_ocr_segment
+          sam deploy \
+          --template-file sam-template.yaml \
+          --no-confirm-changeset \
+          --no-fail-on-empty-changeset \
+          --stack-name lambda-deploy-gptocr \
+          --s3-bucket ${{ secrets.DEPLOYMENT_BUCKET }} \
+          --capabilities CAPABILITY_IAM
+          
+          
+
